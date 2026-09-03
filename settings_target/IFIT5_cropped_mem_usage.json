@@ -1,5 +1,5 @@
 {
-    "design_path": "/storage/viet/BindCraft/outputs/IFIT5_bindcraft_ewok_4080",
+    "design_path": "/storage/viet/BindCraft/outputs/IFIT5_bindcraft_ewok_4080_mem_usage",
     "binder_name": "IFIT5_bindcraft_ewok-Binder",
     "starting_pdb": "/storage/viet/BindCraft/inputs/IFIT5_cropped.pdb",
     "chains": "A",
@@ -8,5 +8,5 @@
         65,
         150
     ],
-    "number_of_final_designs": 11
+    "number_of_final_designs": 5
 }

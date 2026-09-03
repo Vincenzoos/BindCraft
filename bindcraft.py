@@ -47,11 +47,13 @@ trajectory_csv = os.path.join(target_settings["design_path"], 'trajectory_stats.
 mpnn_csv = os.path.join(target_settings["design_path"], 'mpnn_design_stats.csv')
 final_csv = os.path.join(target_settings["design_path"], 'final_design_stats.csv')
 failure_csv = os.path.join(target_settings["design_path"], 'failure_csv.csv')
+gpu_memory_csv = os.path.join(target_settings["design_path"], 'gpu_memory_stats.csv')
 
 create_dataframe(trajectory_csv, trajectory_labels)
 create_dataframe(mpnn_csv, design_labels)
 create_dataframe(final_csv, final_labels)
 generate_filter_pass_csv(failure_csv, args.filters)
+create_gpu_memory_csv(gpu_memory_csv)
 
 ####################################
 ####################################
@@ -106,9 +108,10 @@ while True:
         print("Starting trajectory: "+design_name)
 
         ### Begin binder hallucination
-        trajectory = binder_hallucination(design_name, target_settings["starting_pdb"], target_settings["chains"],
-                                            target_settings["target_hotspot_residues"], length, seed, helicity_value,
-                                            design_models, advanced_settings, design_paths, failure_csv)
+        with GpuMemoryTracker(gpu_memory_csv, design_name, "trajectory_backbone_generation"):
+            trajectory = binder_hallucination(design_name, target_settings["starting_pdb"], target_settings["chains"],
+                                                target_settings["target_hotspot_residues"], length, seed, helicity_value,
+                                                design_models, advanced_settings, design_paths, failure_csv)
         trajectory_metrics = copy_dict(trajectory._tmp["best"]["aux"]["log"]) # contains plddt, ptm, i_ptm, pae, i_pae
         trajectory_pdb = os.path.join(design_paths["Trajectory"], design_name + ".pdb")
 
@@ -173,7 +176,8 @@ while True:
                 design_start_time = time.time()
 
                 ### MPNN redesign of starting binder
-                mpnn_trajectories = mpnn_gen_sequence(trajectory_pdb, binder_chain, trajectory_interface_residues, advanced_settings)
+                with GpuMemoryTracker(gpu_memory_csv, design_name, "mpnn_generation"):
+                    mpnn_trajectories = mpnn_gen_sequence(trajectory_pdb, binder_chain, trajectory_interface_residues, advanced_settings)
                 existing_mpnn_sequences = set(pd.read_csv(mpnn_csv, usecols=['Sequence'])['Sequence'].values)
 
                 # create set of MPNN sequences with allowed amino acid composition
@@ -232,11 +236,14 @@ while True:
                             save_fasta(mpnn_design_name, mpnn_sequence['seq'], design_paths)
                         
                         ### Predict mpnn redesigned binder complex using masked templates
-                        mpnn_complex_statistics, pass_af2_filters = predict_binder_complex(complex_prediction_model,
-                                                                                        mpnn_sequence['seq'], mpnn_design_name,
-                                                                                        target_settings["starting_pdb"], target_settings["chains"],
-                                                                                        length, trajectory_pdb, prediction_models, advanced_settings,
-                                                                                        filters, design_paths, failure_csv)
+                        with GpuMemoryTracker(gpu_memory_csv, mpnn_design_name, "complex_prediction") as memory_tracker:
+                            mpnn_complex_statistics, pass_af2_filters = predict_binder_complex(complex_prediction_model,
+                                                                                            mpnn_sequence['seq'], mpnn_design_name,
+                                                                                            target_settings["starting_pdb"], target_settings["chains"],
+                                                                                            length, trajectory_pdb, prediction_models, advanced_settings,
+                                                                                            filters, design_paths, failure_csv)
+                            if not pass_af2_filters:
+                                memory_tracker.set_status("filter_failed")
 
                         # if AF2 filters are not passed then skip the scoring
                         if not pass_af2_filters:
@@ -305,8 +312,9 @@ while True:
                         mpnn_complex_averages = calculate_averages(mpnn_complex_statistics, handle_aa=True)
                         
                         ### Predict binder alone in single sequence mode
-                        binder_statistics = predict_binder_alone(binder_prediction_model, mpnn_sequence['seq'], mpnn_design_name, length,
-                                                                trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths)
+                        with GpuMemoryTracker(gpu_memory_csv, mpnn_design_name, "binder_only_prediction"):
+                            binder_statistics = predict_binder_alone(binder_prediction_model, mpnn_sequence['seq'], mpnn_design_name, length,
+                                                                    trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths)
 
                         # extract RMSDs of binder to the original trajectory
                         for model_num in prediction_models:

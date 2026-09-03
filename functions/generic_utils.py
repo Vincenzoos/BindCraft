@@ -9,8 +9,167 @@ import shutil
 import zipfile
 import random
 import math
+import csv
+import subprocess
+import threading
 import pandas as pd
 import numpy as np
+
+
+# GPU memory logging
+GPU_MEMORY_LABELS = [
+    'design_name', 'stage',
+    'bindcraft_actual_memory_before_mib', 'bindcraft_actual_peak_memory_mib',
+    'bindcraft_actual_memory_after_mib',
+    'bindcraft_reserved_memory_before_mib', 'bindcraft_reserved_peak_memory_mib',
+    'bindcraft_reserved_memory_after_mib',
+    'gpu_capacity_mib', 'bindcraft_actual_peak_percent',
+    'bindcraft_reserved_peak_percent', 'status', 'error'
+]
+
+
+def create_gpu_memory_csv(path):
+    """Create the per-job GPU memory CSV without overwriting an existing log."""
+    if not os.path.exists(path):
+        with open(path, 'w', newline='') as file:
+            csv.DictWriter(file, fieldnames=GPU_MEMORY_LABELS).writeheader()
+
+
+def _mib(value):
+    return round(value / (1024 ** 2), 2) if value is not None else None
+
+
+def _jax_memory_stats():
+    """Return JAX allocator bytes for the first GPU, when available."""
+    try:
+        devices = jax.devices('gpu')
+        if not devices:
+            return None, None
+        stats = devices[0].memory_stats()
+        if not stats:
+            return None, None
+        actual = stats.get('bytes_in_use')
+        # Some JAX backends expose bytes_reserved; otherwise the process-level
+        # nvidia-smi value is used for reserved memory.
+        reserved = stats.get('bytes_reserved')
+        return actual, reserved
+    except Exception:
+        return None, None
+
+
+def _nvidia_smi_memory():
+    """Return (process memory bytes, GPU capacity bytes) for this process."""
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-compute-apps=pid,gpu_uuid,used_memory',
+             '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=2, check=True)
+        pid = str(os.getpid())
+        process_memory = 0
+        gpu_uuids = set()
+        for line in result.stdout.splitlines():
+            fields = [field.strip() for field in line.split(',')]
+            if len(fields) >= 3 and fields[0] == pid:
+                process_memory += float(fields[2]) * 1024 ** 2
+                gpu_uuids.add(fields[1])
+
+        capacity = None
+        if gpu_uuids:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=gpu_uuid,memory.total',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=2, check=True)
+            capacities = {}
+            for line in result.stdout.splitlines():
+                fields = [field.strip() for field in line.split(',')]
+                if len(fields) >= 2:
+                    capacities[fields[0]] = float(fields[1]) * 1024 ** 2
+            matching = [capacities[uuid] for uuid in gpu_uuids if uuid in capacities]
+            if matching:
+                capacity = max(matching)
+        return process_memory, capacity
+    except Exception:
+        return None, None
+
+
+class GpuMemoryTracker:
+    """Sample BindCraft GPU memory during one named pipeline stage."""
+    def __init__(self, csv_path, design_name, stage, interval=0.2):
+        self.csv_path = csv_path
+        self.design_name = design_name
+        self.stage = stage
+        self.interval = interval
+        self.status = 'completed'
+        self.error = ''
+        self._stop = threading.Event()
+        self._thread = None
+        self._actual = []
+        self._reserved = []
+        self._capacity = []
+
+    def _sample(self):
+        actual, jax_reserved = _jax_memory_stats()
+        process_reserved, capacity = _nvidia_smi_memory()
+        reserved = process_reserved if process_reserved is not None else jax_reserved
+        if actual is not None:
+            self._actual.append(actual)
+        if reserved is not None:
+            self._reserved.append(reserved)
+        if capacity is not None:
+            self._capacity.append(capacity)
+
+    def _run(self):
+        while not self._stop.is_set():
+            self._sample()
+            self._stop.wait(self.interval)
+
+    def set_status(self, status, error=''):
+        self.status = status
+        self.error = str(error)[:500] if error else ''
+
+    def __enter__(self):
+        self._sample()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is not None:
+            self.set_status('failed', exc_value)
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1, self.interval * 2))
+        self._sample()
+        self._write_record()
+        return False
+
+    def _write_record(self):
+        actual_before = self._actual[0] if self._actual else None
+        actual_after = self._actual[-1] if self._actual else None
+        actual_peak = max(self._actual) if self._actual else None
+        reserved_before = self._reserved[0] if self._reserved else None
+        reserved_after = self._reserved[-1] if self._reserved else None
+        reserved_peak = max(self._reserved) if self._reserved else None
+        capacity = max(self._capacity) if self._capacity else None
+
+        row = {
+            'design_name': self.design_name,
+            'stage': self.stage,
+            'bindcraft_actual_memory_before_mib': _mib(actual_before),
+            'bindcraft_actual_peak_memory_mib': _mib(actual_peak),
+            'bindcraft_actual_memory_after_mib': _mib(actual_after),
+            'bindcraft_reserved_memory_before_mib': _mib(reserved_before),
+            'bindcraft_reserved_peak_memory_mib': _mib(reserved_peak),
+            'bindcraft_reserved_memory_after_mib': _mib(reserved_after),
+            'gpu_capacity_mib': _mib(capacity),
+            'bindcraft_actual_peak_percent': round(actual_peak / capacity * 100, 2) if actual_peak and capacity else None,
+            'bindcraft_reserved_peak_percent': round(reserved_peak / capacity * 100, 2) if reserved_peak and capacity else None,
+            'status': self.status,
+            'error': self.error,
+        }
+        with open(self.csv_path, 'a', newline='') as file:
+            csv.DictWriter(file, fieldnames=GPU_MEMORY_LABELS).writerow(row)
+            file.flush()
 
 # Define labels for dataframes
 def generate_dataframe_labels():
