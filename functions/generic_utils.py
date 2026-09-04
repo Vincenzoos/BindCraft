@@ -94,11 +94,12 @@ def _nvidia_smi_memory():
 
 class GpuMemoryTracker:
     """Sample BindCraft GPU memory during one named pipeline stage."""
-    def __init__(self, csv_path, design_name, stage, interval=0.2):
+    def __init__(self, csv_path, design_name, stage, interval=0.2, enabled=True):
         self.csv_path = csv_path
         self.design_name = design_name
         self.stage = stage
         self.interval = interval
+        self.enabled = enabled
         self.status = 'completed'
         self.error = ''
         self._stop = threading.Event()
@@ -128,12 +129,16 @@ class GpuMemoryTracker:
         self.error = str(error)[:500] if error else ''
 
     def __enter__(self):
+        if not self.enabled:
+            return self
         self._sample()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        if not self.enabled:
+            return False
         if exc_type is not None:
             self.set_status('failed', exc_value)
         self._stop.set()

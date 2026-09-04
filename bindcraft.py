@@ -17,6 +17,8 @@ parser.add_argument('--filters', '-f', type=str, default='./settings_filters/def
                     help='Path to the filters.json file used to filter design. If not provided, default will be used.')
 parser.add_argument('--advanced', '-a', type=str, default='./settings_advanced/default_4stage_multimer.json',
                     help='Path to the advanced.json file with additional design settings. If not provided, default will be used.')
+parser.add_argument('--gpu-memory-tracking', action='store_true',
+                    help='Track GPU memory usage and write gpu_memory_stats.csv.')
 
 args = parser.parse_args()
 
@@ -47,13 +49,14 @@ trajectory_csv = os.path.join(target_settings["design_path"], 'trajectory_stats.
 mpnn_csv = os.path.join(target_settings["design_path"], 'mpnn_design_stats.csv')
 final_csv = os.path.join(target_settings["design_path"], 'final_design_stats.csv')
 failure_csv = os.path.join(target_settings["design_path"], 'failure_csv.csv')
-gpu_memory_csv = os.path.join(target_settings["design_path"], 'gpu_memory_stats.csv')
+gpu_memory_csv = os.path.join(target_settings["design_path"], 'gpu_memory_stats.csv') if args.gpu_memory_tracking else None
 
 create_dataframe(trajectory_csv, trajectory_labels)
 create_dataframe(mpnn_csv, design_labels)
 create_dataframe(final_csv, final_labels)
 generate_filter_pass_csv(failure_csv, args.filters)
-create_gpu_memory_csv(gpu_memory_csv)
+if args.gpu_memory_tracking:
+    create_gpu_memory_csv(gpu_memory_csv)
 
 ####################################
 ####################################
@@ -108,7 +111,7 @@ while True:
         print("Starting trajectory: "+design_name)
 
         ### Begin binder hallucination
-        with GpuMemoryTracker(gpu_memory_csv, design_name, "trajectory_backbone_generation"):
+        with GpuMemoryTracker(gpu_memory_csv, design_name, "trajectory_backbone_generation", enabled=args.gpu_memory_tracking):
             trajectory = binder_hallucination(design_name, target_settings["starting_pdb"], target_settings["chains"],
                                                 target_settings["target_hotspot_residues"], length, seed, helicity_value,
                                                 design_models, advanced_settings, design_paths, failure_csv)
@@ -176,7 +179,7 @@ while True:
                 design_start_time = time.time()
 
                 ### MPNN redesign of starting binder
-                with GpuMemoryTracker(gpu_memory_csv, design_name, "mpnn_generation"):
+                with GpuMemoryTracker(gpu_memory_csv, design_name, "mpnn_generation", enabled=args.gpu_memory_tracking):
                     mpnn_trajectories = mpnn_gen_sequence(trajectory_pdb, binder_chain, trajectory_interface_residues, advanced_settings)
                 existing_mpnn_sequences = set(pd.read_csv(mpnn_csv, usecols=['Sequence'])['Sequence'].values)
 
@@ -236,7 +239,7 @@ while True:
                             save_fasta(mpnn_design_name, mpnn_sequence['seq'], design_paths)
                         
                         ### Predict mpnn redesigned binder complex using masked templates
-                        with GpuMemoryTracker(gpu_memory_csv, mpnn_design_name, "complex_prediction") as memory_tracker:
+                        with GpuMemoryTracker(gpu_memory_csv, mpnn_design_name, "complex_prediction", enabled=args.gpu_memory_tracking) as memory_tracker:
                             mpnn_complex_statistics, pass_af2_filters = predict_binder_complex(complex_prediction_model,
                                                                                             mpnn_sequence['seq'], mpnn_design_name,
                                                                                             target_settings["starting_pdb"], target_settings["chains"],
@@ -312,7 +315,7 @@ while True:
                         mpnn_complex_averages = calculate_averages(mpnn_complex_statistics, handle_aa=True)
                         
                         ### Predict binder alone in single sequence mode
-                        with GpuMemoryTracker(gpu_memory_csv, mpnn_design_name, "binder_only_prediction"):
+                        with GpuMemoryTracker(gpu_memory_csv, mpnn_design_name, "binder_only_prediction", enabled=args.gpu_memory_tracking):
                             binder_statistics = predict_binder_alone(binder_prediction_model, mpnn_sequence['seq'], mpnn_design_name, length,
                                                                     trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths)
 

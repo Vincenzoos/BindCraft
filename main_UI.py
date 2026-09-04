@@ -835,6 +835,16 @@ def launch_all_ui() -> None:
         layout=widgets.Layout(width="85%"),
         style={"description_width": "120px"},
     )
+    gpu_memory_tracking_w = widgets.Checkbox(
+        value=False,
+        description="Track GPU memory usage",
+        indent=False,
+        layout=widgets.Layout(width="85%"),
+    )
+    gpu_memory_tracking_help = widgets.HTML(
+        "<span style='color:#555;'>Off by default. When enabled, BindCraft writes "
+        "<code>gpu_memory_stats.csv</code> in the design folder.</span>"
+    )
     refresh_gpu_btn = widgets.Button(
         description="Refresh GPU list",
         icon="refresh",
@@ -932,6 +942,8 @@ def launch_all_ui() -> None:
             "--advanced",
             str(SETTINGS_ADVANCED_DIR / advanced_dropdown.value),
         ]
+        if gpu_memory_tracking_w.value:
+            cmd.append("--gpu-memory-tracking")
         return cmd
 
     def on_generate(_):
@@ -946,6 +958,10 @@ def launch_all_ui() -> None:
                     print(f"CUDA_VISIBLE_DEVICES={gpu}")
                 else:
                     print("CUDA_VISIBLE_DEVICES=(unset — use default visible GPUs)")
+                print(
+                    "GPU memory tracking="
+                    + ("enabled" if gpu_memory_tracking_w.value else "disabled")
+                )
                 print(" \\\n  ".join(cmd))
                 print("\nReady. Press Run BindCraft to start.")
         except Exception as e:
@@ -1509,6 +1525,8 @@ def launch_all_ui() -> None:
             refresh_target_btn,
             options_banner,
             gpu_dropdown,
+            gpu_memory_tracking_w,
+            gpu_memory_tracking_help,
             widgets.HBox([refresh_gpu_btn]),
             gpu_status,
             widgets.HTML("<b>nvidia-smi details for the current selection</b>"),
