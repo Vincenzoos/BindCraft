@@ -727,10 +727,9 @@ def launch_all_ui() -> None:
         job_name_w.value = name
         state["job_name"] = name
         job_dir = Path(design_path_w.value.strip())
-        job_dir.mkdir(parents=True, exist_ok=True)
         job_status.value = (
             f"<span style='{OK}'>Job name = design_path folder: <b>{name}</b> "
-            f"(outputs/logs → {job_dir})</span>"
+            f"(outputs/logs → {job_dir}; created when changes are saved)</span>"
         )
 
     design_path_w.observe(_sync_job_name_from_design_path, names="value")
