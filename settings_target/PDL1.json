@@ -1,9 +1,12 @@
 {
-    "design_path": "/content/drive/My Drive/BindCraft/PDL1/",
-    "binder_name": "PDL1",
-    "starting_pdb": "/content/bindcraft/example/PDL1.pdb",
+    "design_path": "/storage/viet/BindCraft/outputs/PDL1_bindcraft",
+    "binder_name": "PDL1-Binder",
+    "starting_pdb": "/storage/viet/BindCraft/inputs/PDL1.pdb",
     "chains": "A",
-    "target_hotspot_residues": "56",
-    "lengths": [65, 150],
-    "number_of_final_designs": 100
+    "target_hotspot_residues": "",
+    "lengths": [
+        65,
+        150
+    ],
+    "number_of_final_designs": 1
 }
