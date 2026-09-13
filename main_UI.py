@@ -774,7 +774,7 @@ def launch_all_ui() -> None:
         f"no spaces/path separators; max {_NAME_MAX_LEN} characters</li>"
         f"<li><code>design_path</code> — required; writable output directory; "
         f"max {_DESIGN_PATH_MAX_LEN} characters; no <code>*?&lt;&gt;|\"</code>; "
-        f"folder name same rules as binder_name (max {_NAME_MAX_LEN})</li>"
+        f"folder name same rules as binder_name (max {_NAME_MAX_LEN} characters)</li>"
         "<li><code>starting_pdb</code> — required; select an existing PDB/CIF from <code>inputs/</code></li>"
         f"<li><code>chains</code> — required; comma-separated PDB chain IDs "
         f"(e.g. <code>A</code> or <code>A,C</code>); single alphanumeric ID per chain; "
