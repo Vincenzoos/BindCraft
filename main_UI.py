@@ -123,6 +123,170 @@ def _parse_lengths(raw: str) -> List[int]:
     raise ValueError(f"Could not parse lengths from: {raw!r} (expected e.g. [65, 150])")
 
 
+# binder_name / design_path folder become filesystem prefixes/paths.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# File Name stem: must start with a letter (not digit, -, or _).
+_FILE_STEM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_NAME_MAX_LEN = 150
+_DESIGN_PATH_MAX_LEN = 512  # full output path string
+_CHAINS_MAX_LEN = 64  # e.g. A or A,C — BindCraft typically few chains
+_HOTSPOTS_MAX_LEN = 500  # residue list / ranges for prep_pos
+# ColabDesign splits chains on "," without stripping spaces.
+_CHAINS_RE = re.compile(r"^[A-Za-z0-9](,[A-Za-z0-9])*$")
+# prep_pos tokens: "A", "23", "27-30", "A23", "A27-50" (see ColabDesign shared/prep.py).
+_HOTSPOT_TOKEN_RE = re.compile(r"^(?:[A-Za-z]\d+(?:-\d+)?|\d+(?:-\d+)?|[A-Za-z])$")
+_FIELD_INVALID_CLASS = "bc-field-invalid"
+_FIELD_VALIDATION_CSS = f"""
+<style>
+/* Highlight the input/select only — not the label+widget wrapper */
+.{_FIELD_INVALID_CLASS} input[type="text"],
+.{_FIELD_INVALID_CLASS} input[type="number"],
+.{_FIELD_INVALID_CLASS} input:not([type]),
+.{_FIELD_INVALID_CLASS} select {{
+  border: 2px solid #cf222e !important;
+  outline: none !important;
+  box-shadow: 0 0 0 1px #cf222e;
+}}
+</style>
+"""
+
+
+def _set_field_invalid(widget: widgets.Widget, invalid: bool) -> None:
+    """Mark invalid by CSS class on the widget so only the text box is highlighted."""
+    # Clear any wrapper border from older validation styling.
+    widget.layout.border = None
+    if invalid:
+        widget.add_class(_FIELD_INVALID_CLASS)
+    else:
+        widget.remove_class(_FIELD_INVALID_CLASS)
+
+
+def _normalize_csv_tokens(value: str) -> str:
+    """Collapse 'A, B' → 'A,B' (ColabDesign does not strip spaces around commas)."""
+    return re.sub(r"\s*,\s*", ",", (value or "").strip())
+
+
+def _validate_safe_name(
+    value: str,
+    label: str,
+    *,
+    require: bool = False,
+    max_len: Optional[int] = None,
+) -> Optional[str]:
+    """Names used in output filenames / folder names (binder_name, job folder)."""
+    v = (value or "").strip()
+    if not v:
+        return f"{label} is required" if require else None
+    if max_len is not None and len(v) > max_len:
+        return f"{label}: max {max_len} characters (got {len(v)})"
+    if not _SAFE_NAME_RE.match(v):
+        return (
+            f"{label}: use letters/digits/_/- only (no spaces or path separators); "
+            f"must start with a letter or digit"
+        )
+    return None
+
+
+def _validate_target_file_name(value: str, *, require: bool = False) -> Optional[str]:
+    v = (value or "").strip()
+    if not v:
+        return "File Name is required" if require else None
+    if "/" in v or "\\" in v:
+        return "File Name must be a basename only (no folders)"
+    stem = v[:-5] if v.lower().endswith(".json") else v
+    if not stem:
+        return "File Name needs a name before .json"
+    if stem[0] in "-_" or stem[0].isdigit():
+        return "File Name must start with a letter (not a number, - , or _)"
+    if len(stem) > _NAME_MAX_LEN:
+        return f"File Name: max {_NAME_MAX_LEN} characters (got {len(stem)})"
+    if not _FILE_STEM_RE.match(stem):
+        return (
+            "File Name: use letters/digits/_/- only (no spaces); "
+            "must start with a letter"
+        )
+    return None
+
+
+def _validate_design_path(value: str, *, require: bool = False) -> Optional[str]:
+    """design_path is any writable directory; its folder name becomes the job name."""
+    v = (value or "").strip()
+    if not v:
+        return "design_path is required" if require else None
+    if len(v) > _DESIGN_PATH_MAX_LEN:
+        return f"design_path: max {_DESIGN_PATH_MAX_LEN} characters (got {len(v)})"
+    if any(c in v for c in '*?<>|"\0'):
+        return "design_path contains invalid characters"
+    try:
+        folder = _job_name_from_design_path(v)
+    except ValueError as e:
+        return str(e)
+    return _validate_safe_name(
+        folder, "design_path folder name", require=True, max_len=_NAME_MAX_LEN
+    )
+
+
+def _validate_chains(value: str, *, require: bool = False) -> Optional[str]:
+    """Target chains passed to ColabDesign prep_inputs(chain=...), e.g. 'A' or 'A,C'."""
+    v = _normalize_csv_tokens(value)
+    if not v:
+        return "chains is required" if require else None
+    if len(v) > _CHAINS_MAX_LEN:
+        return f"chains: max {_CHAINS_MAX_LEN} characters (got {len(v)})"
+    if not _CHAINS_RE.match(v):
+        return "chains: comma-separated PDB chain IDs, e.g. A or A,C (no spaces)"
+    return None
+
+
+def _validate_hotspots(value: str) -> Optional[str]:
+    """
+    target_hotspot_residues for BindCraft / ColabDesign prep_pos.
+    Empty = no preference (AF2 picks site). Examples: 1,2-10 | A1-10,B1-20 | A.
+    """
+    v = _normalize_csv_tokens(value)
+    if not v:
+        return None
+    if len(v) > _HOTSPOTS_MAX_LEN:
+        return f"hotspots: max {_HOTSPOTS_MAX_LEN} characters (got {len(v)})"
+    for tok in v.split(","):
+        if not tok or not _HOTSPOT_TOKEN_RE.match(tok):
+            return (
+                "hotspots: residue list for BindCraft, e.g. A56,A60-65 or 1,2-10 "
+                "(or a chain letter for a whole chain; leave empty for no preference)"
+            )
+        m = re.match(r"^[A-Za-z]?(\d+)(?:-(\d+))?$", tok)
+        if m and m.group(2) is not None and int(m.group(1)) > int(m.group(2)):
+            return f"hotspots range invalid: {tok}"
+    return None
+
+
+def _validate_lengths_field(value: str, *, require: bool = False) -> Optional[str]:
+    """Binder length range; BindCraft samples with np.arange(min(lengths), max(lengths)+1)."""
+    v = (value or "").strip()
+    if not v:
+        return "lengths is required" if require else None
+    try:
+        lo, hi = _parse_lengths(v)
+    except Exception:
+        return "lengths must be two integers (min/max binder size), e.g. [65, 150] or 65,150"
+    if lo < 1 or hi < 1:
+        return "lengths must be positive integers (binder residue count)"
+    return None
+
+
+def _validate_num_designs(value, *, require: bool = False) -> Optional[str]:
+    """number_of_final_designs — positive int, max 100 Accepted designs."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "num designs is required" if require else None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "num designs must be a positive integer (1–100)"
+    if n < 1 or n > 100:
+        return "num designs must be between 1 and 100"
+    return None
+
+
 def _validate_pdb(pdb_path: Path) -> List[str]:
     warnings: List[str] = []
     try:
@@ -598,8 +762,43 @@ def launch_all_ui() -> None:
 
     # --- Target JSON editor ---
     editor_banner = _banner("Or you can edit/create a new target JSON file.")
+    editor_tips = widgets.HTML(
+        "<div style='font-size:0.92em;margin:4px 0 10px 0;line-height:1.45;'>"
+        "<b>Target JSON fields</b>:"
+        "<ul style='margin:6px 0 0 18px;padding:0;'>"
+        f"<li><code>File Name</code> — required; basename only (optional <code>.json</code>); "
+        f"must start with a letter (not digit, <code>-</code>, or <code>_</code>); "
+        f"only letters/digits/<code>_</code>/<code>-</code>; max {_NAME_MAX_LEN} characters</li>"
+        f"<li><code>binder_name</code> — required; PDB filename prefix; "
+        f"must start with a letter or digit; only letters/digits/<code>_</code>/<code>-</code>; "
+        f"no spaces/path separators; max {_NAME_MAX_LEN} characters</li>"
+        f"<li><code>design_path</code> — required; writable output directory; "
+        f"max {_DESIGN_PATH_MAX_LEN} characters; no <code>*?&lt;&gt;|\"</code>; "
+        f"folder name same rules as binder_name (max {_NAME_MAX_LEN})</li>"
+        "<li><code>starting_pdb</code> — required; select an existing PDB/CIF from <code>inputs/</code></li>"
+        f"<li><code>chains</code> — required; comma-separated PDB chain IDs "
+        f"(e.g. <code>A</code> or <code>A,C</code>); single alphanumeric ID per chain; "
+        f"max {_CHAINS_MAX_LEN} characters</li>"
+        f"<li><code>hotspots</code> — optional (empty = no preference); "
+        f"tokens like <code>A56</code>, <code>A60-65</code>, <code>1,2-10</code>, or whole chain <code>A</code>; "
+        f"ranges must have min ≤ max; max {_HOTSPOTS_MAX_LEN} characters</li>"
+        "<li><code>lengths</code> — required; two positive integers for binder size min/max "
+        "(e.g. <code>[65, 150]</code> or <code>65,150</code>)</li>"
+        "<li><code>num designs</code> — required; integer from 1 to 100 "
+        "(Accepted designs to reach)</li>"
+        "</ul>"
+        "Invalid text boxes are highlighted in red. "
+        "<b>Save Changes</b> stays disabled until all fields are valid. "
+        "</div>"
+    )
+    editor_validation_css = widgets.HTML(_FIELD_VALIDATION_CSS)
     style = {"description_width": "140px"}
-    layout = widgets.Layout(width="70%")
+
+    def _field_layout() -> widgets.Layout:
+        # Each widget needs its own Layout — a shared instance means border
+        # updates on one field overwrite every other field.
+        return widgets.Layout(width="70%")
+
     # PDB list first so File Name / binder_name can default from it
     pdb_name_to_path = {name: p for name, p in _list_pdb_options(INPUTS_DIR)}
     pdb_names = list(pdb_name_to_path.keys()) or ["(no PDB files in inputs/)"]
@@ -619,18 +818,32 @@ def launch_all_ui() -> None:
 
     init_json, init_binder, init_design = _defaults_from_pdb_name(initial_pdb)
 
-    file_name_w = widgets.Text(value=init_json, description="File Name:", layout=layout)
+    file_name_w = widgets.Text(
+        value=init_json,
+        description="File Name:",
+        layout=_field_layout(),
+        style=style,
+        placeholder="e.g. PDL1.json",
+    )
     design_path_w = widgets.Text(
-        value=init_design, description="design_path:", layout=layout, style=style
+        value=init_design,
+        description="design_path:",
+        layout=_field_layout(),
+        style=style,
+        placeholder="e.g. /path/to/outputs/PDL1_bindcraft",
     )
     binder_name_w = widgets.Text(
-        value=init_binder, description="binder_name:", layout=layout, style=style
+        value=init_binder,
+        description="binder_name:",
+        layout=_field_layout(),
+        style=style,
+        placeholder="e.g. PDL1-Binder",
     )
     starting_pdb_w = widgets.Dropdown(
         options=pdb_names,
         value=initial_pdb,
         description="starting_pdb:",
-        layout=layout,
+        layout=_field_layout(),
         style=style,
     )
     refresh_pdb_btn = widgets.Button(
@@ -677,53 +890,147 @@ def launch_all_ui() -> None:
     starting_pdb_w.observe(_sync_defaults_from_pdb, names="value")
     refresh_pdb_btn.on_click(lambda _: refresh_pdb_dropdown())
     pdb_picker_row = widgets.VBox([starting_pdb_w, refresh_pdb_btn])
-    chains_w = widgets.Text(value="A", description="chains:", layout=layout, style=style)
+    chains_w = widgets.Text(
+        value="A",
+        description="chains:",
+        layout=_field_layout(),
+        style=style,
+        placeholder="e.g. A or A,C",
+    )
     hotspots_w = widgets.Text(
         value="",
         description="hotspots:",
-        layout=layout,
+        layout=_field_layout(),
         style=style,
         placeholder="e.g. A56,A60-65 (empty = no preference)",
     )
-    lengths_w = widgets.Text(value="[65, 150]", description="lengths:", layout=layout, style=style)
-    n_designs_w = widgets.IntText(
-        value=100, description="num designs:", layout=layout, style=style
+    lengths_w = widgets.Text(
+        value="[65, 150]",
+        description="lengths:",
+        layout=_field_layout(),
+        style=style,
+        placeholder="e.g. [65, 150] (min, max binder size)",
+    )
+    n_designs_w = widgets.BoundedIntText(
+        value=100,
+        min=1,
+        max=100,
+        step=1,
+        description="num designs:",
+        layout=_field_layout(),
+        style=style,
     )
     save_json_btn = widgets.Button(
         description="Save Changes",
         button_style="success",
         layout=widgets.Layout(width="70%", height="40px"),
+        disabled=True,
+        tooltip="Fix invalid fields before saving",
     )
     save_json_status = widgets.HTML("")
 
+    def _target_field_errors(*, require: bool) -> List[str]:
+        checks = [
+            _validate_target_file_name(file_name_w.value, require=require),
+            _validate_design_path(design_path_w.value, require=require),
+            _validate_safe_name(
+                binder_name_w.value, "binder_name", require=require, max_len=_NAME_MAX_LEN
+            ),
+            _validate_chains(chains_w.value, require=require),
+            _validate_hotspots(hotspots_w.value),
+            _validate_lengths_field(lengths_w.value, require=require),
+            _validate_num_designs(n_designs_w.value, require=require),
+        ]
+        return [msg for msg in checks if msg]
+
+    def _pdb_selection_ok() -> bool:
+        pdb_sel = _selected_pdb_path()
+        return bool(pdb_sel) and Path(pdb_sel).is_file()
+
+    def _refresh_target_form_validity(change=None):
+        """Per-field red border + disable Save until every required input is valid."""
+        pairs = [
+            (file_name_w, _validate_target_file_name(file_name_w.value, require=True)),
+            (design_path_w, _validate_design_path(design_path_w.value, require=True)),
+            (
+                binder_name_w,
+                _validate_safe_name(
+                    binder_name_w.value,
+                    "binder_name",
+                    require=True,
+                    max_len=_NAME_MAX_LEN,
+                ),
+            ),
+            (chains_w, _validate_chains(chains_w.value, require=True)),
+            (hotspots_w, _validate_hotspots(hotspots_w.value)),
+            (lengths_w, _validate_lengths_field(lengths_w.value, require=True)),
+            (n_designs_w, _validate_num_designs(n_designs_w.value, require=True)),
+        ]
+        for w, err in pairs:
+            _set_field_invalid(w, err is not None)
+
+        pdb_ok = _pdb_selection_ok()
+        _set_field_invalid(starting_pdb_w, not pdb_ok)
+
+        errors = [err for _, err in pairs if err]
+        if not pdb_ok:
+            errors.append("Select a valid starting_pdb")
+
+        save_json_btn.disabled = bool(errors)
+        save_json_btn.tooltip = (
+            "Fix invalid fields before saving" if errors else "Save target JSON"
+        )
+
+    for _w in (
+        file_name_w,
+        design_path_w,
+        binder_name_w,
+        chains_w,
+        hotspots_w,
+        lengths_w,
+        n_designs_w,
+        starting_pdb_w,
+    ):
+        _w.observe(_refresh_target_form_validity, names="value")
+    _refresh_target_form_validity()
+
     def on_save_json(_):
         try:
-            fname = file_name_w.value.strip()
-            if not fname.endswith(".json"):
-                fname += ".json"
+            _refresh_target_form_validity()
+            errors = _target_field_errors(require=True)
             pdb_sel = _selected_pdb_path()
             if not pdb_sel or not Path(pdb_sel).is_file():
+                errors.append(
+                    "Select a valid starting_pdb from the dropdown "
+                    "(upload a PDB to inputs/ first if the list is empty)."
+                )
+            if errors or save_json_btn.disabled:
+                bullets = "".join(f"<li>{e}</li>" for e in errors)
                 save_json_status.value = (
-                    f"<span style='{ERR}'>Select a valid starting_pdb from the dropdown "
-                    f"(upload a PDB to inputs/ first if the list is empty).</span>"
+                    f"<span style='{ERR}'>Fix validation errors before saving:</span>"
+                    f"<ul style='margin:4px 0 0 18px;'>{bullets}</ul>"
                 )
                 return
+
+            fname = file_name_w.value.strip()
+            if not fname.lower().endswith(".json"):
+                fname += ".json"
             payload = {
                 "design_path": design_path_w.value.strip(),
                 "binder_name": binder_name_w.value.strip(),
                 "starting_pdb": pdb_sel,
-                "chains": chains_w.value.strip(),
-                "target_hotspot_residues": hotspots_w.value.strip(),
+                "chains": _normalize_csv_tokens(chains_w.value),
+                "target_hotspot_residues": _normalize_csv_tokens(hotspots_w.value),
                 "lengths": _parse_lengths(lengths_w.value),
                 "number_of_final_designs": int(n_designs_w.value),
             }
-            out = SETTINGS_TARGET_DIR / fname
+            out = SETTINGS_TARGET_DIR / Path(fname).name
             out.write_text(json.dumps(payload, indent=4) + "\n")
             Path(payload["design_path"]).mkdir(parents=True, exist_ok=True)
             save_json_status.value = f"<span style='{OK}'>Saved {out}</span>"
             refresh_target_dropdown()
-            if fname in list(target_dropdown.options):
-                target_dropdown.value = fname
+            if out.name in list(target_dropdown.options):
+                target_dropdown.value = out.name
         except Exception as e:
             save_json_status.value = f"<span style='{ERR}'>Error: {e}</span>"
 
@@ -794,12 +1101,15 @@ def launch_all_ui() -> None:
             desired = str(data.get("starting_pdb", "")).strip()
             refresh_pdb_dropdown(select=desired)
             file_name_w.value = fname
-            design_path_w.value = str(data.get("design_path", ""))
-            binder_name_w.value = str(data.get("binder_name", ""))
-            chains_w.value = str(data.get("chains", "A"))
-            hotspots_w.value = str(data.get("target_hotspot_residues", ""))
+            design_path_w.value = str(data.get("design_path", "") or "")
+            binder_name_w.value = str(data.get("binder_name", "") or "")
+            chains_w.value = str(data.get("chains", "A") or "A")
+            hotspots_raw = data.get("target_hotspot_residues", "")
+            hotspots_w.value = "" if hotspots_raw in (None, "null") else str(hotspots_raw)
             lengths_w.value = str(data.get("lengths", [65, 150]))
-            n_designs_w.value = int(data.get("number_of_final_designs", 100))
+            n_raw = int(data.get("number_of_final_designs", 100))
+            n_designs_w.value = max(1, min(100, n_raw))
+            _refresh_target_form_validity()
         except Exception:
             pass
 
@@ -1601,6 +1911,8 @@ def launch_all_ui() -> None:
             json_status,
             upload_note,
             editor_banner,
+            editor_tips,
+            editor_validation_css,
             file_name_w,
             design_path_w,
             binder_name_w,
