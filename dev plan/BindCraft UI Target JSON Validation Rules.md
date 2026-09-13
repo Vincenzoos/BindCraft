@@ -18,6 +18,7 @@ This matches the live tips list under “Or you can edit/create a new target JSO
 | `_DESIGN_PATH_MAX_LEN` (512) | Max length for full `design_path` string |
 | `_CHAINS_MAX_LEN` (64) | Max length for `chains` |
 | `_HOTSPOTS_MAX_LEN` (500) | Max length for `hotspots` |
+| `_BINDER_LENGTH_MAX` (300) | Max residue count allowed in `lengths` min/max |
 | `_FILE_STEM_RE` | File Name stem: `^[A-Za-z][A-Za-z0-9_-]*$` |
 | `_SAFE_NAME_RE` | binder / folder: `^[A-Za-z0-9][A-Za-z0-9_-]*$` |
 | `_CHAINS_RE` | `^[A-Za-z0-9](,[A-Za-z0-9])*$` |
@@ -38,7 +39,7 @@ On save, `chains` and `hotspots` are normalized with `_normalize_csv_tokens` (`A
 | **starting_pdb** | `starting_pdb` | `widgets.Dropdown` | Yes | Must select an existing `.pdb` / `.cif` from `inputs/` (absolute path written into JSON) |
 | **chains** | `chains` | `widgets.Text` | Yes | Comma-separated PDB chain IDs, e.g. `A` or `A,C`; one alphanumeric ID per entry; max **64** chars |
 | **hotspots** | `target_hotspot_residues` | `widgets.Text` | No | Empty = no preference (AF2 picks site). Else comma-separated tokens: `A56`, `A60-65`, `1,2-10`, whole chain `A`; range min ≤ max; max **500** chars |
-| **lengths** | `lengths` | `widgets.Text` | Yes | Two positive integers (binder size min/max), e.g. `[65, 150]` or `65,150`; order may be either way (BindCraft uses `min`/`max`) |
+| **lengths** | `lengths` | `widgets.Text` | Yes | Two positive integers with **min < max**, e.g. `[65, 150]` or `65,150`; each value in **1–300** (`[200, 150]` invalid; max cannot exceed 300) |
 | **num designs** | `number_of_final_designs` | `widgets.BoundedIntText` (`min=1`, `max=100`, `step=1`) | Yes | Integer **1–100** (Accepted designs to reach); values loaded from JSON are clamped into range |
 
 ### Placeholders (empty text helpers)
@@ -50,7 +51,7 @@ On save, `chains` and `hotspots` are normalized with `_normalize_csv_tokens` (`A
 | binder_name | `e.g. PDL1-Binder` |
 | chains | `e.g. A or A,C` |
 | hotspots | `e.g. A56,A60-65 (empty = no preference)` |
-| lengths | `e.g. [65, 150] (min, max binder size)` |
+| lengths | `e.g. [65, 150] (min < max, max ≤ 300)` |
 | num designs | *(spinner; no placeholder — always has a numeric value)* |
 
 ## Invalid highlight behaviour
@@ -89,7 +90,7 @@ On save, `chains` and `hotspots` are normalized with `_normalize_csv_tokens` (`A
 4. **File Name letter start:** `_foo.json`, `-foo.json`, `9foo.json` → invalid; `IFIT5_cropped.json` → valid.
 5. **Max lengths:** paste >150 chars into File Name stem or binder_name → invalid; >512 into design_path → invalid; long chains/hotspots past 64/500 → invalid.
 6. **chains / hotspots format:** `A,C` OK; `A,,B` invalid; `A56,A60-65` OK; `A60-50` (range inverted) invalid; empty hotspots OK.
-7. **lengths:** `[65, 150]` and `150,65` OK; `[0, 10]` invalid.
+7. **lengths:** `[65, 150]` OK; `[200, 150]` invalid (min ≥ max); `[65, 301]` invalid (max > 300); `[0, 10]` invalid.
 8. **num designs:** spinner only allows 1–100; Save enabled when the rest of the form is valid.
 9. Fix all fields → red highlights clear → **Save Changes** enabled → JSON written under `settings_target/` with normalized `chains` / `hotspots`.
 

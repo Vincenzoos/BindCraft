@@ -131,6 +131,7 @@ _NAME_MAX_LEN = 150
 _DESIGN_PATH_MAX_LEN = 512  # full output path string
 _CHAINS_MAX_LEN = 64  # e.g. A or A,C — BindCraft typically few chains
 _HOTSPOTS_MAX_LEN = 500  # residue list / ranges for prep_pos
+_BINDER_LENGTH_MAX = 300  # max residue count allowed in lengths[min, max]
 # ColabDesign splits chains on "," without stripping spaces.
 _CHAINS_RE = re.compile(r"^[A-Za-z0-9](,[A-Za-z0-9])*$")
 # prep_pos tokens: "A", "23", "27-30", "A23", "A27-50" (see ColabDesign shared/prep.py).
@@ -261,7 +262,7 @@ def _validate_hotspots(value: str) -> Optional[str]:
 
 
 def _validate_lengths_field(value: str, *, require: bool = False) -> Optional[str]:
-    """Binder length range; BindCraft samples with np.arange(min(lengths), max(lengths)+1)."""
+    """Binder length range [min, max]: require min < max and both in 1.._BINDER_LENGTH_MAX."""
     v = (value or "").strip()
     if not v:
         return "lengths is required" if require else None
@@ -271,6 +272,12 @@ def _validate_lengths_field(value: str, *, require: bool = False) -> Optional[st
         return "lengths must be two integers (min/max binder size), e.g. [65, 150] or 65,150"
     if lo < 1 or hi < 1:
         return "lengths must be positive integers (binder residue count)"
+    if lo >= hi:
+        return "lengths: min must be < max (e.g. [65, 150], not [150, 65])"
+    if hi > _BINDER_LENGTH_MAX:
+        return f"lengths: max binder size cannot exceed {_BINDER_LENGTH_MAX} (got {hi})"
+    if lo > _BINDER_LENGTH_MAX:
+        return f"lengths: min binder size cannot exceed {_BINDER_LENGTH_MAX} (got {lo})"
     return None
 
 
@@ -782,8 +789,8 @@ def launch_all_ui() -> None:
         f"<li><code>hotspots</code> — optional (empty = no preference); "
         f"tokens like <code>A56</code>, <code>A60-65</code>, <code>1,2-10</code>, or whole chain <code>A</code>; "
         f"ranges must have min ≤ max; max {_HOTSPOTS_MAX_LEN} characters</li>"
-        "<li><code>lengths</code> — required; two positive integers for binder size min/max "
-        "(e.g. <code>[65, 150]</code> or <code>65,150</code>)</li>"
+        f"<li><code>lengths</code> — required; two positive integers with <b>min &lt; max</b> "
+        f"(e.g. <code>[65, 150]</code> or <code>65,150</code>); each value 1–{_BINDER_LENGTH_MAX}</li>"
         "<li><code>num designs</code> — required; integer from 1 to 100 "
         "(Accepted designs to reach)</li>"
         "</ul>"
@@ -909,7 +916,7 @@ def launch_all_ui() -> None:
         description="lengths:",
         layout=_field_layout(),
         style=style,
-        placeholder="e.g. [65, 150] (min, max binder size)",
+        placeholder="e.g. [65, 150] (min < max, max ≤ 300)",
     )
     n_designs_w = widgets.BoundedIntText(
         value=100,
