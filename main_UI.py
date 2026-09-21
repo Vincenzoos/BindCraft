@@ -436,6 +436,19 @@ def _nvidia_smi_output() -> str:
         return f"Unable to run nvidia-smi: {exc}"
 
 
+def _is_this_bindcraft_process(pid: int, cmdline: str = "") -> bool:
+    """True if pid/cmdline belongs to this BindCraft install (not FreeBindCraft, etc.)."""
+    text = cmdline or ""
+    if str(BINDCRAFT_SCRIPT) in text:
+        return True
+    try:
+        cwd = Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+        cwd.relative_to(BINDCRAFT_ROOT)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _bindcraft_gpu_processes_output() -> str:
     """Return a readable list of active BindCraft processes using GPU memory."""
     rows: List[Tuple[str, str, str, str, str, str]] = []
@@ -480,6 +493,8 @@ def _bindcraft_gpu_processes_output() -> str:
                 if len(info) < 3:
                     continue
                 user, process, command = info
+                if not _is_this_bindcraft_process(int(pid), process_info):
+                    continue
                 try:
                     cwd = os.readlink(f"/proc/{pid}/cwd")
                 except OSError:
@@ -607,6 +622,8 @@ def _discover_running_jobs() -> Dict[str, Dict[str, Any]]:
                     continue
                 pid = int(parts[0])
                 cmd = parts[1]
+                if not _is_this_bindcraft_process(pid, cmd):
+                    continue
                 settings_path = _extract_settings_path_from_cmd(cmd)
                 if settings_path is None:
                     continue
