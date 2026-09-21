@@ -715,6 +715,21 @@ def launch_all_ui() -> None:
         """
     )
 
+    licensing_banner = _banner("Licensing")
+    licensing = widgets.HTML(
+        """
+        <p style="font-size:0.95em;color:#555;margin:4px 0 12px 0;">
+          BindCraft is MIT-licensed
+          (<a href="https://github.com/martinpacesa/BindCraft" target="_blank" rel="noopener">BindCraft</a>) and uses PyRosetta, which is free for academic and non-profit use but requires a
+          commercial license for non-academic use (see
+          <a href="https://www.pyrosetta.org/home/licensing-pyrosetta" target="_blank" rel="noopener">PyRosetta licensing</a>
+          and the
+          <a href="https://rosettacommons.org/software/licensing-faq/" target="_blank" rel="noopener">Rosetta Commons licensing FAQ</a>).
+          Ensure your institution has the appropriate licenses before commercial or for-profit use.
+        </p>
+        """
+    )
+
     # --- Uploads ---
     upload_intro = widgets.HTML("<p>Next, you can upload a PDB or a target JSON file:</p>")
     pdb_banner = _banner(f"Step 1: If not already present, upload a PDB file to {INPUTS_DIR}/")
@@ -1909,6 +1924,8 @@ def launch_all_ui() -> None:
     ui = widgets.VBox(
         [
             welcome,
+            licensing_banner,
+            licensing,
             upload_intro,
             pdb_banner,
             pdb_upload,
