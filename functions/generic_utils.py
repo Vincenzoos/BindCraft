@@ -27,12 +27,29 @@ GPU_MEMORY_LABELS = [
     'bindcraft_reserved_peak_percent', 'status', 'error'
 ]
 
+# CPU memory logging.  The RSS value is the same resident-memory value shown
+# by htop's RES column.  It is sampled from procfs directly so tracking does
+# not need to launch an interactive htop process for every sample.
+CPU_MEMORY_LABELS = [
+    'design_name', 'stage',
+    'bindcraft_rss_before_mib', 'bindcraft_rss_peak_mib',
+    'bindcraft_rss_after_mib', 'system_memory_total_mib',
+    'bindcraft_rss_peak_percent', 'status', 'error'
+]
+
 
 def create_gpu_memory_csv(path):
     """Create the per-job GPU memory CSV without overwriting an existing log."""
     if not os.path.exists(path):
         with open(path, 'w', newline='') as file:
             csv.DictWriter(file, fieldnames=GPU_MEMORY_LABELS).writeheader()
+
+
+def create_cpu_memory_csv(path):
+    """Create the per-job CPU memory CSV without overwriting an existing log."""
+    if not os.path.exists(path):
+        with open(path, 'w', newline='') as file:
+            csv.DictWriter(file, fieldnames=CPU_MEMORY_LABELS).writeheader()
 
 
 def _mib(value):
@@ -174,6 +191,124 @@ class GpuMemoryTracker:
         }
         with open(self.csv_path, 'a', newline='') as file:
             csv.DictWriter(file, fieldnames=GPU_MEMORY_LABELS).writerow(row)
+            file.flush()
+
+
+def _htop_memory_stats(pid=None):
+    """Return (process RSS bytes, system memory bytes) using htop-compatible stats.
+
+    htop reads the Linux procfs values used here for its RES and Mem values.
+    Reading procfs directly is reliable for a background sampler and avoids
+    scraping htop's interactive terminal output.  A ``ps`` fallback keeps the
+    process RSS measurement usable on systems exposing ps but not procfs.
+    """
+    pid = str(pid or os.getpid())
+    rss = None
+    total = None
+
+    try:
+        with open(f'/proc/{pid}/status') as status_file:
+            for line in status_file:
+                if line.startswith('VmRSS:'):
+                    rss = float(line.split()[1]) * 1024
+                    break
+    except (FileNotFoundError, OSError, ValueError, IndexError):
+        pass
+
+    try:
+        with open('/proc/meminfo') as meminfo_file:
+            for line in meminfo_file:
+                if line.startswith('MemTotal:'):
+                    total = float(line.split()[1]) * 1024
+                    break
+    except (FileNotFoundError, OSError, ValueError, IndexError):
+        pass
+
+    if rss is None:
+        try:
+            result = subprocess.run(
+                ['ps', '-p', pid, '-o', 'rss='],
+                capture_output=True, text=True, timeout=2, check=True)
+            rss_kib = result.stdout.strip()
+            if rss_kib:
+                rss = float(rss_kib) * 1024
+        except (FileNotFoundError, OSError, ValueError, subprocess.SubprocessError):
+            pass
+
+    return rss, total
+
+
+class CpuMemoryTracker:
+    """Sample BindCraft resident CPU memory during one named pipeline stage."""
+    def __init__(self, csv_path, design_name, stage, interval=0.2, enabled=True):
+        self.csv_path = csv_path
+        self.design_name = design_name
+        self.stage = stage
+        self.interval = interval
+        self.enabled = enabled
+        self.status = 'completed'
+        self.error = ''
+        self._stop = threading.Event()
+        self._thread = None
+        self._rss = []
+        self._capacity = []
+
+    def _sample(self):
+        rss, capacity = _htop_memory_stats()
+        if rss is not None:
+            self._rss.append(rss)
+        if capacity is not None:
+            self._capacity.append(capacity)
+
+    def _run(self):
+        while not self._stop.is_set():
+            self._sample()
+            self._stop.wait(self.interval)
+
+    def set_status(self, status, error=''):
+        self.status = status
+        self.error = str(error)[:500] if error else ''
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+        self._sample()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if not self.enabled:
+            return False
+        if exc_type is not None:
+            self.set_status('failed', exc_value)
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1, self.interval * 2))
+        self._sample()
+        self._write_record()
+        return False
+
+    def _write_record(self):
+        rss_before = self._rss[0] if self._rss else None
+        rss_after = self._rss[-1] if self._rss else None
+        rss_peak = max(self._rss) if self._rss else None
+        capacity = max(self._capacity) if self._capacity else None
+
+        row = {
+            'design_name': self.design_name,
+            'stage': self.stage,
+            'bindcraft_rss_before_mib': _mib(rss_before),
+            'bindcraft_rss_peak_mib': _mib(rss_peak),
+            'bindcraft_rss_after_mib': _mib(rss_after),
+            'system_memory_total_mib': _mib(capacity),
+            'bindcraft_rss_peak_percent': round(rss_peak / capacity * 100, 2)
+            if rss_peak is not None and capacity else None,
+            'status': self.status,
+            'error': self.error,
+        }
+        with open(self.csv_path, 'a', newline='') as file:
+            csv.DictWriter(file, fieldnames=CPU_MEMORY_LABELS).writerow(row)
             file.flush()
 
 # Define labels for dataframes

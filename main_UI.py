@@ -520,6 +520,144 @@ def _bindcraft_gpu_processes_output() -> str:
     )
     return "\n".join(lines)
 
+
+def _read_proc_memory() -> Dict[str, int]:
+    """Return the system memory values that htop displays in its Mem/Swp bars."""
+    values: Dict[str, int] = {}
+    try:
+        with open("/proc/meminfo") as meminfo:
+            for line in meminfo:
+                name, _, value = line.partition(":")
+                fields = value.split()
+                if name in {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"} and fields:
+                    values[name] = int(fields[0]) * 1024
+    except (FileNotFoundError, OSError, ValueError, IndexError):
+        pass
+    return values
+
+
+def _format_memory_size(value: int) -> str:
+    """Format bytes using the compact units used by htop."""
+    units = ("B", "K", "M", "G", "T")
+    amount = float(value)
+    unit = 0
+    while amount >= 1024 and unit < len(units) - 1:
+        amount /= 1024
+        unit += 1
+    return f"{amount:.1f}{units[unit]}"
+
+
+def _htop_output() -> str:
+    """Return a readable htop-style CPU/memory snapshot for the UI.
+
+    htop is an interactive terminal application, so its screen output is not
+    stable to capture into a notebook textarea.  This report uses the same
+    procfs/ps values htop displays and keeps the output refreshable and
+    readable in Jupyter.
+    """
+    memory = _read_proc_memory()
+    try:
+        load_average = os.getloadavg()
+        load_text = " ".join(f"{value:.2f}" for value in load_average)
+    except (AttributeError, OSError):
+        load_text = "unavailable"
+
+    try:
+        ps = subprocess.run(
+            ["ps", "-eo", "pid=,user=,stat=,pcpu=,pmem=,rss=,etime=,time=,args=", "--sort=-pcpu"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        process_lines = [line for line in ps.stdout.splitlines() if line.strip()]
+    except (FileNotFoundError, OSError) as exc:
+        return f"CPU process information is unavailable: {exc}"
+
+    total = memory.get("MemTotal")
+    available = memory.get("MemAvailable")
+    used = total - available if total is not None and available is not None else None
+    swap_total = memory.get("SwapTotal")
+    swap_free = memory.get("SwapFree")
+    swap_used = swap_total - swap_free if swap_total is not None and swap_free is not None else None
+
+    lines = [
+        "htop-style CPU and memory snapshot (refresh to update)",
+        f"CPU cores: {os.cpu_count() or 'unknown'}    Load average: {load_text}",
+        f"Mem: {_format_memory_size(used)} / {_format_memory_size(total)} used"
+        if used is not None and total is not None else "Mem: unavailable",
+        f"Swp: {_format_memory_size(swap_used)} / {_format_memory_size(swap_total)} used"
+        if swap_used is not None and swap_total is not None else "Swp: unavailable",
+        f"Tasks: {len(process_lines)}    BindCraft PID: {os.getpid()}",
+        "",
+        f"{'PID':>7} {'USER':<16} {'STAT':<5} {'CPU%':>6} {'MEM%':>6} "
+        f"{'RES':>10} {'TIME+':>10} COMMAND",
+        "-" * 110,
+    ]
+    for line in process_lines[:30]:
+        fields = line.split(maxsplit=8)
+        if len(fields) < 9:
+            continue
+        pid, user, state, cpu, mem, rss, elapsed, cpu_time, command = fields
+        try:
+            rss_text = _format_memory_size(int(rss) * 1024)
+        except ValueError:
+            rss_text = "?"
+        lines.append(
+            f"{pid:>7} {user:<16.16} {state:<5} {cpu:>6} {mem:>6} "
+            f"{rss_text:>10} {cpu_time:>10} {command[:60]}"
+        )
+    return "\n".join(lines)
+
+
+def _bindcraft_cpu_processes_output() -> str:
+    """Return active BindCraft processes with htop-style CPU and RSS columns."""
+    rows: List[Tuple[str, str, str, str, str, str, str, str]] = []
+    try:
+        ps = subprocess.run(
+            ["ps", "-eo", "pid=,user=,comm=,pcpu=,pmem=,rss=,etime=,time=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for line in ps.stdout.splitlines():
+            fields = line.split(maxsplit=8)
+            if len(fields) < 9:
+                continue
+            pid, user, process, cpu, mem, rss, elapsed, cpu_time, command = fields
+            if not pid.isdigit() or "bindcraft.py" not in command.lower():
+                continue
+            if not _is_this_bindcraft_process(int(pid), command):
+                continue
+            try:
+                cwd = os.readlink(f"/proc/{pid}/cwd")
+            except OSError:
+                cwd = "(unavailable)"
+            rows.append((pid, user, process, cpu, mem, rss, elapsed, cwd))
+    except (FileNotFoundError, OSError):
+        return "CPU process information is unavailable because ps was not found."
+    except Exception as exc:
+        return f"Unable to read BindCraft CPU processes: {exc}"
+
+    if not rows:
+        return "No active BindCraft jobs are currently using CPU resources."
+
+    headers = ("PID", "USER", "PROCESS", "CPU%", "MEM%", "RSS", "ELAPSED", "CWD")
+    lines = [
+        f"{headers[0]:<8} {headers[1]:<16} {headers[2]:<12} {headers[3]:>6} "
+        f"{headers[4]:>6} {headers[5]:>10} {headers[6]:>10} {headers[7]}",
+        "-" * 115,
+    ]
+    for pid, user, process, cpu, mem, rss, elapsed, cwd in rows:
+        try:
+            rss_text = _format_memory_size(int(rss) * 1024)
+        except ValueError:
+            rss_text = "?"
+        lines.append(
+            f"{pid:<8} {user:<16.16} {process:<12.12} {cpu:>6} {mem:>6} "
+            f"{rss_text:>10} {elapsed:>10} {cwd}"
+        )
+    return "\n".join(lines)
+
 def _load_target_progress_meta(target_json_name: str) -> tuple[Path, int]:
     """Return (design_path, number_of_final_designs) from a settings_target JSON."""
     path = SETTINGS_TARGET_DIR / target_json_name
@@ -1227,8 +1365,24 @@ def launch_all_ui() -> None:
         "<span style='color:#555;'>Off by default. When enabled, BindCraft writes "
         "<code>gpu_memory_stats.csv</code> in the design folder.</span>"
     )
+    cpu_memory_tracking_w = widgets.Checkbox(
+        value=False,
+        description="Track CPU memory usage",
+        indent=False,
+        layout=widgets.Layout(width="85%"),
+    )
+    cpu_memory_tracking_help = widgets.HTML(
+        "<span style='color:#555;'>Off by default. When enabled, BindCraft writes "
+        "<code>cpu_memory_stats.csv</code> in the design folder."
+    )
     refresh_gpu_btn = widgets.Button(
         description="Refresh GPU list",
+        icon="refresh",
+        button_style="info",
+        layout=widgets.Layout(width="180px"),
+    )
+    refresh_cpu_btn = widgets.Button(
+        description="Refresh CPU stats",
         icon="refresh",
         button_style="info",
         layout=widgets.Layout(width="180px"),
@@ -1264,10 +1418,36 @@ def launch_all_ui() -> None:
         disabled=True,
         layout=widgets.Layout(width="95%", height="130px", overflow="auto"),
     )
+    cpu_htop_help = widgets.HTML(
+        "<div style='font-family:sans-serif; line-height:1.45; max-width:1000px;'>"
+        "<b>How to read CPU stats:</b> This htop-style report shows the current system load, "
+        "RAM and swap usage, CPU percentage, and resident memory (RSS) for processes. "
+        "Refresh it while a BindCraft job is running to see changes."
+        "</div>"
+    )
+    cpu_htop_output = widgets.Textarea(
+        value=_htop_output(),
+        disabled=True,
+        layout=widgets.Layout(width="95%", height="360px", overflow="auto"),
+    )
+    cpu_process_help = widgets.HTML(
+        "<div style='font-family:sans-serif; line-height:1.45; max-width:1000px;'>"
+        "<b>Active BindCraft jobs:</b> This table shows BindCraft processes and their current CPU and memory use. "
+        "<b>CPU%</b> is process CPU utilization, <b>MEM%</b> is the share of system RAM, <b>RSS</b> is resident "
+        "memory, and <b>CWD</b> is the project folder. If the table is empty, no BindCraft job is currently running."
+        "</div>"
+    )
+    cpu_process_output = widgets.Textarea(
+        value=_bindcraft_cpu_processes_output(),
+        disabled=True,
+        layout=widgets.Layout(width="95%", height="130px", overflow="auto"),
+    )
 
     def refresh_nvidia_smi(_=None):
         gpu_smi_output.value = _nvidia_smi_output()
         gpu_process_output.value = _bindcraft_gpu_processes_output()
+        cpu_htop_output.value = _htop_output()
+        cpu_process_output.value = _bindcraft_cpu_processes_output()
 
     def on_gpu_change(_):
         refresh_nvidia_smi()
@@ -1283,6 +1463,7 @@ def launch_all_ui() -> None:
         refresh_nvidia_smi()
 
     refresh_gpu_btn.on_click(refresh_gpu_dropdown)
+    refresh_cpu_btn.on_click(refresh_nvidia_smi)
 
     select_help = widgets.HTML(
         "<p>Select a <code>settings_filters</code> file and a "
@@ -1326,6 +1507,8 @@ def launch_all_ui() -> None:
         ]
         if gpu_memory_tracking_w.value:
             cmd.append("--gpu-memory-tracking")
+        if cpu_memory_tracking_w.value:
+            cmd.append("--cpu-memory-tracking")
         return cmd
 
     def on_generate(_):
@@ -1343,6 +1526,10 @@ def launch_all_ui() -> None:
                 print(
                     "GPU memory tracking="
                     + ("enabled" if gpu_memory_tracking_w.value else "disabled")
+                )
+                print(
+                    "CPU memory tracking="
+                    + ("enabled" if cpu_memory_tracking_w.value else "disabled")
                 )
                 print(" \\\n  ".join(cmd))
                 print("\nReady. Press Run BindCraft to start.")
@@ -1976,7 +2163,9 @@ def launch_all_ui() -> None:
             gpu_dropdown,
             gpu_memory_tracking_w,
             gpu_memory_tracking_help,
-            widgets.HBox([refresh_gpu_btn]),
+            cpu_memory_tracking_w,
+            cpu_memory_tracking_help,
+            widgets.HBox([refresh_gpu_btn, refresh_cpu_btn]),
             gpu_status,
             widgets.HTML("<b>nvidia-smi details for the current selection</b>"),
             gpu_smi_help,
@@ -1984,6 +2173,12 @@ def launch_all_ui() -> None:
             widgets.HTML("<b>Active BindCraft jobs using GPU memory</b>"),
             gpu_process_help,
             gpu_process_output,
+            widgets.HTML("<b>htop details for the current machine</b>"),
+            cpu_htop_help,
+            cpu_htop_output,
+            widgets.HTML("<b>Active BindCraft jobs using CPU and memory</b>"),
+            cpu_process_help,
+            cpu_process_output,
             select_help,
             filters_dropdown,
             advanced_dropdown,

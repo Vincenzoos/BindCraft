@@ -1,0 +1,12 @@
+{
+    "design_path": "/storage/viet/BindCraft/outputs/IFIT5_cropped_300_bindcraft",
+    "binder_name": "IFIT5_cropped_300-Binder",
+    "starting_pdb": "/storage/viet/BindCraft/inputs/IFIT5_cropped_300.pdb",
+    "chains": "A",
+    "target_hotspot_residues": "",
+    "lengths": [
+        65,
+        150
+    ],
+    "number_of_final_designs": 10
+}
